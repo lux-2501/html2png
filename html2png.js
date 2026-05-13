@@ -3,36 +3,59 @@
  * html2png.js — 将本地 HTML 导出为高清 PNG
  *
  * 用法：
- *   node html2png.js <input.html> [output.png] [--scale=2] [--width=3047] [--height=7582] [--wait=1500]
+ *   html2png <input.html> [output.png] [--scale=2] [--width=N] [--height=N] [--wait=2500]
  *
  * 选项：
- *   --scale=N    设备像素比，1 = 原始px，2 = 双倍（Retina）    默认: 1
+ *   --scale=N    设备像素比，1 = 原始px，2 = 双倍（Retina）    默认: 2
  *   --width=N    强制指定画布宽度（px），不填则自动读 CSS 变量  默认: 自动
  *   --height=N   强制指定画布高度（px）                         默认: 自动
- *   --wait=N     页面加载后额外等待毫秒（字体/动画等）          默认: 1500
+ *   --wait=N     页面加载后额外等待毫秒（字体/动画等）          默认: 2500
+ *   --chrome=P   手动指定 Chrome/Chromium 可执行文件路径
  *
  * 依赖：
  *   npm install puppeteer-core
  *
  * 示例：
- *   node html2png.js 招聘会易拉宝.html                       # → 招聘会易拉宝.png
- *   node html2png.js banner.html out.png --scale=2           # 双倍分辨率
- *   node html2png.js a.html b.png --width=800 --height=600  # 自定义尺寸
+ *   html2png 招聘会易拉宝.html                       # → 招聘会易拉宝.png（双倍分辨率）
+ *   html2png banner.html out.png --scale=3           # 三倍分辨率
+ *   html2png a.html b.png --width=800 --height=600  # 自定义尺寸
  */
-
 'use strict';
 
 const puppeteer = require('puppeteer-core');
 const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
+const os        = require('os');
+
+// ─── 在 ~/.cache/puppeteer 里动态查找 chrome-headless-shell ─────────────────
+function findCachedHeadlessShell() {
+  const base = path.join(os.homedir(), '.cache', 'puppeteer', 'chrome-headless-shell');
+  if (!fs.existsSync(base)) return null;
+  // 遍历所有版本目录，找第一个可执行的 chrome-headless-shell
+  for (const version of fs.readdirSync(base)) {
+    const versionDir = path.join(base, version);
+    if (!fs.statSync(versionDir).isDirectory()) continue;
+    for (const platform of fs.readdirSync(versionDir)) {
+      const platformDir = path.join(versionDir, platform);
+      if (!fs.statSync(platformDir).isDirectory()) continue;
+      for (const file of fs.readdirSync(platformDir)) {
+        if (file === 'chrome-headless-shell' || file === 'chrome-headless-shell.exe') {
+          const full = path.join(platformDir, file);
+          if (fs.existsSync(full)) return full;
+        }
+      }
+    }
+  }
+  return null;
+}
 
 // ─── macOS / Windows / Linux Chrome 路径候选 ───────────────────────────────
 const CHROME_CANDIDATES = [
-  '/Applications/Arc.app/Contents/MacOS/Arc',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Arc.app/Contents/MacOS/Arc',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   '/usr/bin/google-chrome',
@@ -41,11 +64,19 @@ const CHROME_CANDIDATES = [
 ];
 
 function findChrome() {
+  // 1. 优先使用 puppeteer 缓存的 chrome-headless-shell（最稳定）
+  const cached = findCachedHeadlessShell();
+  if (cached) return cached;
+
+  // 2. 回退到系统已安装的浏览器
   for (const p of CHROME_CANDIDATES) {
     if (fs.existsSync(p)) return p;
   }
+
   throw new Error(
-    '找不到 Chrome。请安装 Google Chrome，或通过 --chrome=/path/to/chrome 指定。'
+    '找不到 Chrome。请安装 Google Chrome，或：\n' +
+    '  npx puppeteer browsers install chrome-headless-shell\n' +
+    '也可通过 --chrome=/path/to/chrome 手动指定。'
   );
 }
 
@@ -75,10 +106,8 @@ function startServer(dir) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-
-      const rawPath = decodeURIComponent(req.url.split('?')[0]);
+      const rawPath  = decodeURIComponent(req.url.split('?')[0]);
       const filePath = path.join(dir, rawPath);
-
       try {
         const data = fs.readFileSync(filePath);
         res.setHeader('Content-Type', MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream');
@@ -113,12 +142,14 @@ async function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
 
   if (!pos[0] || flags.help || flags.h) {
-    console.log('用法: node html2png.js <input.html> [output.png] [--scale=1] [--width=N] [--height=N] [--wait=1500]');
+    console.log('用法: html2png <input.html> [output.png] [--scale=2] [--width=N] [--height=N] [--wait=2500]');
     process.exit(0);
   }
 
   const htmlPath   = path.resolve(pos[0]);
-  const outputPath = pos[1] ? path.resolve(pos[1]) : path.join(path.dirname(path.resolve(pos[0])), path.basename(pos[0]).replace(/\.html?$/i, '.png'));
+  const outputPath = pos[1]
+    ? path.resolve(pos[1])
+    : path.join(path.dirname(htmlPath), path.basename(htmlPath).replace(/\.html?$/i, '.png'));
   const scale      = parseFloat(flags.scale ?? 2);
   const extraWait  = parseInt(flags.wait ?? 2500);
   const chromePath = flags.chrome ?? findChrome();
@@ -135,32 +166,31 @@ async function main() {
   log('💾 输出:', outputPath);
 
   // 1. 启动本地文件服务器
-  const server = await startServer(htmlDir);
-  const port   = server.address().port;
+  const server  = await startServer(htmlDir);
+  const port    = server.address().port;
   const pageUrl = `http://127.0.0.1:${port}/${encodeURIComponent(htmlName)}`;
   log('🌐 服务器端口:', port);
 
   // 2. 启动 Chrome（无头模式）
   log('🔵 Chrome:', chromePath);
   const browser = await puppeteer.launch({
-    executablePath: flags.chrome || "/Users/zhipengchen/.cache/puppeteer/chrome-headless-shell/mac_arm-127.0.6533.88/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+    executablePath: chromePath,
     headless: true,
     timeout: 0,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-web-security',          // 允许加载本地资源
+      '--disable-web-security',
       '--allow-file-access-from-files',
       '--disable-features=IsolateOrigins,site-per-process',
-      '--font-render-hinting=none',      // 字体渲染更清晰
+      '--font-render-hinting=none',
     ],
   });
 
   try {
     const page = await browser.newPage();
-
-    // 先用普通视口加载，让 JS 跑一遍
     await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
+
     log('⏳ 加载页面…');
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
@@ -168,21 +198,11 @@ async function main() {
     const detected = await page.evaluate(() => {
       const cs = getComputedStyle(document.documentElement);
       const px = v => parseInt((v || '').trim());
-
-      // 优先读 --trim-w / --trim-h（设计稿成品尺寸，不含出血）
-      // 次选 --w / --h（含出血）
-      const w = px(cs.getPropertyValue('--trim-w')) ||
-                px(cs.getPropertyValue('--w'))       || 0;
-      const h = px(cs.getPropertyValue('--trim-h')) ||
-                px(cs.getPropertyValue('--h'))       || 0;
-
+      const w  = px(cs.getPropertyValue('--trim-w')) || px(cs.getPropertyValue('--w')) || 0;
+      const h  = px(cs.getPropertyValue('--trim-h')) || px(cs.getPropertyValue('--h')) || 0;
       if (w && h) return { w, h, src: 'css-var' };
-
-      // 回退：读 #canvas 元素的 offsetWidth/Height
       const el = document.getElementById('canvas');
       if (el) return { w: el.offsetWidth, h: el.offsetHeight, src: 'element' };
-
-      // 最后兜底：body 尺寸
       return { w: document.body.scrollWidth, h: document.body.scrollHeight, src: 'body' };
     });
 
@@ -193,11 +213,8 @@ async function main() {
 
     // 4. 重设视口为真实画布尺寸，移除 JS 缩放
     await page.setViewport({ width: W, height: H, deviceScaleFactor: scale });
-
     await page.evaluate((W, H) => {
-      // 关掉 resize 监听里的缩放逻辑
       window.removeEventListener('resize', window._fitScreen ?? (() => {}));
-
       const el = document.getElementById('canvas');
       if (el) {
         el.style.transform       = 'none';
